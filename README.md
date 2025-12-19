@@ -15,29 +15,6 @@ CloudWatchDog is a multi-tenant cloud observability backend that ingests time-se
 
 ---
 
-## Architecture (V1)
-
-Client / Agent
-|
-| POST /api/v1/ingest/metrics
-v
-FastAPI Ingestion Layer
-|
-v
-PostgreSQL (metrics_raw)
-|
-| POST /api/v1/process/run
-v
-Processing Engine
-|
-v
-PostgreSQL (anomalies_raw)
-|
-+--> GET /api/v1/metrics/timeseries
-+--> GET /api/v1/anomalies
-
-
----
 
 ## Tech Stack
 
