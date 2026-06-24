@@ -1,0 +1,6 @@
+psycopg2-binary==2.9.9
+requests==2.31.0
+# Uncomment when you have real data:
+# prophet==1.1.5
+# torch==2.2.0
+# pixie-api==0.5.4

@@ -1,0 +1,192 @@
+version: "3.9"
+
+services:
+  # ── Databases ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: oe-postgres
+    environment:
+      POSTGRES_USER: oe_user
+      POSTGRES_PASSWORD: oe_pass
+      POSTGRES_DB: observability
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oe_user -d observability"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.100.1
+    container_name: oe-victoriametrics
+    ports:
+      - "8428:8428"
+    volumes:
+      - vm_data:/storage
+    command:
+      - "--storageDataPath=/storage"
+      - "--retentionPeriod=90d"
+      - "--httpListenAddr=:8428"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8428/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: oe-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Seed Service (runs once) ─────────────────────────────────────────────────
+  seeder:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.seeder
+    container_name: oe-seeder
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: oe_user
+      DB_PASS: oe_pass
+      DB_NAME: observability
+      VM_URL: http://victoriametrics:8428
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Collector (Go) ───────────────────────────────────────────────────────────
+  collector:
+    build:
+      context: ./collector
+      dockerfile: Dockerfile
+    container_name: oe-collector
+    environment:
+      DB_DSN: postgres://oe_user:oe_pass@postgres:5432/observability?sslmode=disable
+      VM_URL: http://victoriametrics:8428
+      REDIS_URL: redis:6379
+      AWS_ENABLED: "false"
+      AZURE_ENABLED: "false"
+      DEMO_MODE: "true"
+      COLLECTION_INTERVAL: "60s"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seeder:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── Attributor (Python) ──────────────────────────────────────────────────────
+  attributor:
+    build:
+      context: ./attributor
+      dockerfile: Dockerfile
+    container_name: oe-attributor
+    environment:
+      DB_DSN: postgresql://oe_user:oe_pass@postgres:5432/observability
+      VM_URL: http://victoriametrics:8428
+      PIXIE_ENABLED: "false"
+      DEMO_MODE: "true"
+      ATTRIBUTION_INTERVAL: "120s"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seeder:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── API (Go) ─────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: oe-api
+    ports:
+      - "8080:8080"
+    environment:
+      DB_DSN: postgres://oe_user:oe_pass@postgres:5432/observability?sslmode=disable
+      VM_URL: http://victoriametrics:8428
+      REDIS_URL: redis:6379
+      PORT: "8080"
+      CORS_ORIGIN: "http://localhost:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seeder:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Dashboard (React) ────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: oe-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_URL: http://localhost:8080
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Notifier (Go) ───────────────────────────────────────────────────────────
+  notifier:
+    build:
+      context: ./notifier
+      dockerfile: Dockerfile
+    container_name: oe-notifier
+    ports:
+      - "3001:3001"
+    environment:
+      DB_DSN: postgres://oe_user:oe_pass@postgres:5432/observability?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-#cloud-costs}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      OE_API_URL: ${OE_API_URL:-http://api:8080}
+      DIGEST_CRON: ${DIGEST_CRON:-0 9 * * 1}
+      POLL_INTERVAL: ${POLL_INTERVAL:-60s}
+      TAG_POLL_INTERVAL: ${TAG_POLL_INTERVAL:-5m}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  vm_data:
